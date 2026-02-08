@@ -47,6 +47,7 @@ futures = "0.3.24"
 sea-orm = { version = "0.12.0", features = [ "sqlx-postgres", "runtime-tokio-rustls", "macros", "seaography" ] }
 sea-orm-migration = { version = "0.12.0", features = [ "runtime-tokio-rustls", "sqlx-postgres" ] }
 cloud-storage = { version = "0.11.1", features = ["global-client"] }
+hex = "0.4.3"
 memmap2 = "0.7.1"
 log = "0.4.17"
 google-cloud-storage = { version = "0.13.1", features = ["auth", "rustls-tls"], default_features = false }

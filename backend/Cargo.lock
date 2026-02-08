@@ -2817,6 +2817,7 @@ dependencies = [
  "aptos-move-graphql-scalars",
  "aptos-processor-framework",
  "async-trait",
+ "hex",
  "metadata-storage",
  "move-types",
  "pixel-storage",

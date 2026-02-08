@@ -2,17 +2,16 @@ use anyhow::{bail, Context as AnyhowContext, Result};
 use aptos_move_graphql_scalars::Address;
 use aptos_processor_framework::{
     indexer_protos::transaction::v1::{
-        transaction::TxnData, transaction_payload::Payload, write_set_change::Change,
-        EntryFunctionId, MoveModuleId, MoveStructTag, Transaction,
+        transaction::TxnData, transaction_payload::Payload, EntryFunctionId, MoveModuleId,
+        MoveStructTag, Transaction,
     },
     txn_parsers::get_clean_entry_function_payload,
     ProcessingResult, ProcessorTrait,
 };
 use metadata_storage::{MetadataStorageTrait, UpdateAttributionIntent};
-use move_types::{Canvas, Entry, Object};
-use pixel_storage::{CreateCanvasIntent, HardcodedColor, PixelStorageTrait, WritePixelIntent};
+use move_types::Object;
+use pixel_storage::{HardcodedColor, PixelStorageTrait, WritePixelIntent};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::{str::FromStr, sync::Arc};
 use tracing::info;
 
@@ -79,7 +78,6 @@ impl ProcessorTrait for CanvasProcessor {
         start_version: u64,
         end_version: u64,
     ) -> Result<ProcessingResult> {
-        let mut all_create_canvas_intents = Vec::new();
         let mut all_write_pixel_intents = Vec::new();
         let mut all_update_attribution_intents = Vec::new();
         for transaction in transactions {
@@ -101,32 +99,15 @@ impl ProcessorTrait for CanvasProcessor {
                 ))?;
             all_write_pixel_intents.extend(write_pixel_intents);
             all_update_attribution_intents.extend(update_attribution_intents);
-            let create_canvas_intent = self.process_create(&transaction).context(format!(
-                "Failed at process_create for txn version {}",
-                transaction.version
-            ))?;
-            if let Some(create_canvas_intent) = create_canvas_intent {
-                all_create_canvas_intents.push(create_canvas_intent);
-            }
         }
         info!(
             start_version = start_version,
             end_version = end_version,
             processor_name = self.name(),
-            num_canvases_to_create = all_create_canvas_intents.len(),
             num_pixels_to_write = all_write_pixel_intents.len()
         );
 
         if !self.config.disable_pixel_processing {
-            // Create canvases.
-            for create_canvas_intent in all_create_canvas_intents {
-                info!("Creating canvas {}", create_canvas_intent.canvas_address);
-                self.pixels_storage
-                    .create_canvas(create_canvas_intent)
-                    .await
-                    .context("Failed to create canvas in storage")?;
-            }
-
             // Write pixels.
             if !all_write_pixel_intents.is_empty() {
                 info!(
@@ -139,28 +120,6 @@ impl ProcessorTrait for CanvasProcessor {
                     .write_pixels(all_write_pixel_intents)
                     .await
                     .context("Failed to write pixel in storage")?;
-            }
-        }
-
-        if !self.config.disable_metadata_processing {
-            // Update attribution.
-            let len = all_update_attribution_intents.len();
-            for (i, update_attribution_intent) in
-                all_update_attribution_intents.into_iter().enumerate()
-            {
-                info!(
-                    "Updating attribution for canvas {} index {} (intent {}/{} from txns {} to {})",
-                    update_attribution_intent.canvas_address,
-                    update_attribution_intent.index,
-                    i + 1,
-                    len,
-                    start_version,
-                    end_version
-                );
-                self.metadata_storage
-                    .update_attribution(update_attribution_intent)
-                    .await
-                    .context("Failed to update attribution in storage")?;
             }
         }
 
@@ -183,16 +142,7 @@ impl CanvasProcessor {
             }),
             name: "draw".to_string(),
         };
-        let draw_one_function_id = EntryFunctionId {
-            module: Some(MoveModuleId {
-                address: self.config.canvas_contract_address.clone(),
-                name: CANVAS_TOKEN_MODULE_NAME.to_string(),
-            }),
-            name: "draw_one".to_string(),
-        };
-        if !(entry_function_id_matches(transaction, &draw_function_id)
-            || entry_function_id_matches(transaction, &draw_one_function_id))
-        {
+        if !entry_function_id_matches(transaction, &draw_function_id) {
             return nothing;
         }
 
@@ -218,92 +168,37 @@ impl CanvasProcessor {
         let obj: Object = serde_json::from_value(first_arg).context("Failed to parse as Object")?;
         let canvas_address = obj.inner;
 
-        // TODO: This is a bit flaky.
-        let draw_value_type = "vector<0x1::smart_table::Entry<u32, u8>>".to_string();
-
-        let info = transaction.info.as_ref().context("No info")?;
-
         let sender =
             Address::from_str(&request.sender).context("Failed to parse sender address")?;
 
-        let mut write_pixel_intents = vec![];
-        let mut update_attribution_intents = vec![];
-
-        for change in &info.changes {
-            match change.change.as_ref().context("No change")? {
-                // There could be multiple WriteTableItems since draw supports drawing
-                // multiple pixels at once.
-                Change::WriteTableItem(resource) => {
-                    let data = resource.data.as_ref().context("No WriteTableItem data")?;
-                    if data.value_type != draw_value_type {
-                        continue;
-                    }
-                    let values: Vec<Value> = serde_json::from_str(&data.value).unwrap();
-                    // There could be many values because a SmartTable internally is a
-                    // Table where the values are vectors. This means each WriteTableItem
-                    // will have the full new vector being written.
-                    for value in values {
-                        let value: Entry =
-                            serde_json::from_value(value).context("Failed to parse as Entry")?;
-                        let index = value.key.as_u64().unwrap() as u32;
-                        let hardcoded_color_raw: u8 = serde_json::from_value(value.value).unwrap();
-                        write_pixel_intents.push(WritePixelIntent {
-                            canvas_address,
-                            index,
-                            color: HardcodedColor::from(hardcoded_color_raw),
-                        });
-                        update_attribution_intents.push(UpdateAttributionIntent {
-                            canvas_address,
-                            artist_address: sender,
-                            index,
-                            // This information is gone from the contract so we just
-                            // use a hardcoded value for now.
-                            drawn_at_secs: 42,
-                        });
-                    }
-                },
-                _ => continue,
-            }
-        }
-
-        Ok((write_pixel_intents, update_attribution_intents))
-    }
-
-    fn process_create(&self, transaction: &Transaction) -> Result<Option<CreateCanvasIntent>> {
-        // TODO: This check doesn't handle account addresses with leading zeroes.
-        // Skip this transaction if this wasn't a create transaction.
-        let create_function_id = EntryFunctionId {
-            module: Some(MoveModuleId {
-                address: self.config.canvas_contract_address.clone(),
-                name: CANVAS_TOKEN_MODULE_NAME.to_string(),
-            }),
-            name: "create".to_string(),
+        let payload = match request.payload.as_ref().unwrap().payload.as_ref().unwrap() {
+            Payload::EntryFunctionPayload(payload) => payload,
+            _ => return nothing,
         };
-        if !entry_function_id_matches(transaction, &create_function_id) {
-            return Ok(None);
+
+        let xs: Vec<u16> = serde_json::from_str(&payload.arguments[1]).unwrap();
+        let ys: Vec<u16> = serde_json::from_str(&payload.arguments[2]).unwrap();
+        let colors_str: String = serde_json::from_str(&payload.arguments[3]).unwrap();
+        let colors: Vec<u8> = hex::decode(&colors_str[2..]).unwrap();
+
+        let mut write_pixel_intents = vec![];
+
+        for i in 0..xs.len() {
+            let x = xs[i];
+            let y = ys[i];
+            let color = colors[i];
+
+            let index = (y as u32) * 1000 + (x as u32);
+
+            write_pixel_intents.push(WritePixelIntent {
+                canvas_address,
+                user_address: sender,
+                index,
+                color: HardcodedColor::from(color),
+            });
         }
 
-        let info = transaction.info.as_ref().context("No info")?;
-
-        for change in &info.changes {
-            match change.change.as_ref().context("No change")? {
-                Change::WriteResource(resource) => {
-                    if resource.r#type.as_ref().unwrap() != &self.get_canvas_struct_tag() {
-                        continue;
-                    }
-                    let canvas: Canvas =
-                        serde_json::from_str(&resource.data).context("Failed to parse Canvas")?;
-                    return Ok(Some(CreateCanvasIntent {
-                        canvas_address: Address::from_str(&resource.address).unwrap(),
-                        width: canvas.config.width,
-                        height: canvas.config.height,
-                        default_color: HardcodedColor::from(canvas.config.default_color),
-                    }));
-                },
-                _ => continue,
-            }
-        }
-        Ok(None)
+        Ok((write_pixel_intents, vec![]))
     }
 }
 
