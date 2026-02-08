@@ -26,24 +26,13 @@ export function CanvasContainer() {
   useEffect(() => {
     if (isServer()) return;
 
-    const fetchBaseImage = () => {
-      const img = new Image();
-      img.src = APP_CONFIG[network].canvasImageUrl;
-      img.crossOrigin = "anonymous";
-      img.onload = () => {
-        const [pixelArray, cleanUp] = getPixelArrayFromImageElement(img, PIXELS_PER_SIDE);
-        if (pixelArray) setBaseImage(pixelArray);
-        cleanUp();
-      };
-    };
-
-    // Immediately fetch base image
-    fetchBaseImage();
-    // Fetch base image every 3 seconds following the first call above
-    const interval = window.setInterval(fetchBaseImage, 3000);
-
-    return () => {
-      window.clearInterval(interval);
+    // The image is now a static asset bundled with the site.
+    const img = new Image();
+    img.src = APP_CONFIG[network].canvasImageUrl;
+    img.onload = () => {
+      const [pixelArray, cleanUp] = getPixelArrayFromImageElement(img, PIXELS_PER_SIDE);
+      if (pixelArray) setBaseImage(pixelArray);
+      cleanUp();
     };
   }, [network]);
 
