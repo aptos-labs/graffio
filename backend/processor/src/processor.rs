@@ -249,6 +249,7 @@ impl CanvasProcessor {
                         let hardcoded_color_raw: u8 = serde_json::from_value(value.value).unwrap();
                         write_pixel_intents.push(WritePixelIntent {
                             canvas_address,
+                            user_address: sender,
                             index,
                             color: HardcodedColor::from(hardcoded_color_raw),
                         });

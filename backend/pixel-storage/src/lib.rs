@@ -5,6 +5,7 @@ use anyhow::Result;
 use aptos_move_graphql_scalars::Address;
 pub use mmap::{MmapPixelStorage, MmapPixelStorageConfig};
 use std::{collections::HashMap, fmt::Debug};
+use std::ops::Add;
 
 /// Handles creating, updating, and reading canvases.
 #[async_trait::async_trait]
@@ -96,6 +97,7 @@ impl From<&HardcodedColor> for RgbColor {
 pub struct WritePixelIntent {
     /// The address of the object containing the canvas.
     pub canvas_address: Address,
+    pub user_address: Address,
     pub index: u32,
     pub color: HardcodedColor,
 }

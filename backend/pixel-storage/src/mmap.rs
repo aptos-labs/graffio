@@ -1,5 +1,5 @@
 use super::{utils::get_image, CreateCanvasIntent, PixelStorageTrait, WritePixelIntent};
-use crate::RgbColor;
+use crate::{HardcodedColor, RgbColor};
 use anyhow::{Context, Result};
 use aptos_move_graphql_scalars::Address;
 use memmap2::MmapMut;
@@ -11,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use std::str::FromStr;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
@@ -42,6 +43,7 @@ pub struct MmapPixelStorageConfig {
 pub struct MmapPixelStorage {
     config: MmapPixelStorageConfig,
     mmaps: Arc<Mutex<HashMap<Address, MmapMut>>>,
+    //     mmaps: Arc<HashMap<Address, Mutex<HashMap<Address, MmapMut>>>>,
 }
 
 impl MmapPixelStorage {
@@ -98,25 +100,51 @@ impl PixelStorageTrait for MmapPixelStorage {
     }
 
     async fn write_pixels(&self, intents: Vec<WritePixelIntent>) -> Result<()> {
+        let canvas_address_filter = Address::from_str("0x5d45bb2a6f391440ba10444c7734559bd5ef9053930e3ef53d05be332518522b").unwrap();
         // Create a map of canvas address to intents.
-        let mut canvas_to_intents = HashMap::new();
+        let mut user_address_to_intents = HashMap::new();
         for intent in intents.into_iter() {
-            canvas_to_intents
-                .entry(intent.canvas_address)
+            if intent.canvas_address != canvas_address_filter {
+                continue;
+            }
+            user_address_to_intents
+                .entry(intent.user_address)
                 .or_insert_with(Vec::new)
                 .push(intent);
         }
 
-        for (canvas_address, intents) in canvas_to_intents.into_iter() {
+        for (user_address, intents) in user_address_to_intents.into_iter() {
             let intents_len = intents.len();
             info!(
                 "Will write {} pixels to canvas {}",
-                intents_len, canvas_address,
+                intents_len, user_address,
             );
+
+            info!(
+                "Got mmap, will write {} pixels to canvas {}",
+                intents_len, user_address,
+            );
+
             // Get an existing mmap for the canvas file or initialize a new one.
             let mut mmaps = self.mmaps.lock().await;
-            let mmap = mmaps.entry(canvas_address).or_insert_with(|| {
-                let filename = self.get_filename(&canvas_address);
+
+            if !mmaps.contains_key(&user_address) {
+                match self.create_canvas(CreateCanvasIntent {
+                    canvas_address: user_address,
+                    width: 1000,
+                    height: 1000,
+                    default_color: HardcodedColor::White,
+                }).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("Failed to create canvas {}: {}", user_address, e);
+                        panic!("Failed to create canvas {}: {}", user_address, e);
+                    }
+                }
+            }
+
+            let mmap = mmaps.entry(user_address).or_insert_with(|| {
+                let filename = self.get_filename(&user_address);
                 let file = match OpenOptions::new()
                     .read(true)
                     .write(true)
@@ -127,14 +155,10 @@ impl PixelStorageTrait for MmapPixelStorage {
                     Err(e) => {
                         error!("Failed to open file {}: {}", filename.display(), e);
                         panic!("Failed to open file {}: {}", filename.display(), e);
-                    },
+                    }
                 };
                 unsafe { MmapMut::map_mut(&file).expect("Failed to mmap file") }
             });
-            info!(
-                "Got mmap, will write {} pixels to canvas {}",
-                intents_len, canvas_address,
-            );
 
             // Write the pixels to the file through the mmap.
             for intent in intents {
@@ -147,7 +171,7 @@ impl PixelStorageTrait for MmapPixelStorage {
                 mmap[index * 3 + 2] = color.b;
             }
 
-            info!("Wrote {} pixels to canvas {}", intents_len, canvas_address,);
+            info!("Wrote {} pixels to user canvas {}", intents_len, user_address);
         }
 
         Ok(())
